@@ -1,35 +1,59 @@
 import requests
-from bs4 import BeautifulSoup
 import pandas as pd
 import logging
 import demjson3 as demjson
 import time
 import numpy as np
-import re
 import ast
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('tennis_scraper.log'),
+        logging.StreamHandler()
+    ]
+)
 
 def init_session():
-    """Initialize session with headers"""
+    """Initialize session with more complete headers"""
     session = requests.Session()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1"
     }
     session.headers.update(headers)
     return session
 
-def make_request(session, url, retries=3, delay=1):
-    """Make HTTP request with retry logic and delay"""
+
+def make_request(session, url, retries=3, delay=2):
+    """Make HTTP request with improved retry logic and delay"""
     for attempt in range(retries):
         try:
-            time.sleep(delay * (attempt + 1))  # Exponential backoff
-            response = session.get(url)
-            response.raise_for_status()
-            return response
+            if attempt > 0:
+                time.sleep(delay * (attempt))  # Exponential backoff
+            
+            response = session.get(url, timeout=30)  # Add timeout
+            
+            # Check if response is valid
+            if response.status_code == 200:
+                return response
+            else:
+                logging.warning(f"Request failed with status code: {response.status_code}")
+                
         except requests.RequestException as e:
             logging.error(f"Attempt {attempt + 1} failed for {url}: {str(e)}")
             if attempt == retries - 1:
                 raise
+            
+    raise Exception(f"Failed to get valid response after {retries} attempts")
+
 def create_matches_dataframe(matches):
     """Create a DataFrame from matches data with essential columns only"""
     # Define column positions and names mapping
@@ -128,35 +152,35 @@ def parse_matches_from_js(js_content):
 
 
 def get_player_matches(player_name, base_url="https://www.tennisabstract.com"):
-    """Get all matches for a player regardless of gender"""
+    """Get all matches for a player with improved error handling"""
     try:
         session = init_session()
         all_matches = []
+        
+        logging.info(f"Fetching matches for player: {player_name}")
 
         # Try HTML page first (male players)
+        html_url = f'{base_url}/cgi-bin/player-classic.cgi?p={player_name}'
         try:
-            html_url = f'{base_url}/cgi-bin/player-classic.cgi?p={player_name}'
             response = make_request(session, html_url)
+            content = response.text
             
-            # Check if page redirected to Benoit Paire (indicating wrong player/female player)
-            if "Benoit Paire" in response.text[:100]:
+            if "Benoit Paire" in content[:100]:
                 logging.info(f"Redirected to Benoit Paire's page, trying JS files for {player_name}")
+            elif "No player found" in content:
+                logging.error(f"Player {player_name} not found")
+                return None
             else:
-                # Check if page indicates player not found
-                if "No player found" in response.text:
-                    logging.error(f"Player {player_name} not found")
-                    return None
-                    
-                matches = parse_matches_from_html(response.text)
+                matches = parse_matches_from_html(content)
                 if matches:
                     all_matches.extend(matches)
-                    logging.info(f"Found matches in HTML for {player_name}")
+                    logging.info(f"Found {len(matches)} matches in HTML for {player_name}")
 
         except Exception as e:
             logging.warning(f"Could not get matches from HTML for {player_name}: {str(e)}")
 
-        # If no matches found in HTML or redirected to Benoit Paire, try JS files (female players)
-        if not all_matches or "BenoitPaire" in response.text:
+        # Try JS files if needed
+        if not all_matches:
             js_urls = [
                 f"{base_url}/jsmatches/{player_name}.js",
                 f"{base_url}/jsmatches/{player_name}Career.js"
@@ -164,17 +188,16 @@ def get_player_matches(player_name, base_url="https://www.tennisabstract.com"):
             for url in js_urls:
                 try:
                     response = make_request(session, url)
-                    if response.status_code == 200:  # Only process if file exists
-                        matches = parse_matches_from_js(response.text)
-                        if matches:
-                            all_matches.extend(matches)
-                            logging.info(f"Found matches in JS file: {url}")
+                    matches = parse_matches_from_js(response.text)
+                    if matches:
+                        all_matches.extend(matches)
+                        logging.info(f"Found {len(matches)} matches in JS file: {url}")
                 except Exception as e:
                     logging.warning(f"Could not get matches from {url}: {str(e)}")
 
-        # Create DataFrame if matches were found
         if all_matches:
             df = create_matches_dataframe(all_matches)
+            logging.info(f"Successfully created DataFrame with {len(df)} matches")
             return df
         
         logging.warning(f"No matches found for {player_name}")
@@ -183,6 +206,7 @@ def get_player_matches(player_name, base_url="https://www.tennisabstract.com"):
     except Exception as e:
         logging.error(f"Error getting player matches: {str(e)}")
         return None
+
 
 def calculate_yearly_stats(df):
     """
