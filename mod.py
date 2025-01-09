@@ -20,30 +20,47 @@ def init_session():
     """Initialize session with more complete headers"""
     session = requests.Session()
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
-        "DNT": "1"
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0"
     }
     session.headers.update(headers)
     return session
 
 
 def make_request(session, url, retries=3, delay=2):
-    """Make HTTP request with improved retry logic and delay"""
+    """Make HTTP request with improved error handling and validation"""
     for attempt in range(retries):
         try:
             if attempt > 0:
-                time.sleep(delay * (attempt))  # Exponential backoff
+                time.sleep(delay * (attempt))
             
-            response = session.get(url, timeout=30)  # Add timeout
+            response = session.get(url, timeout=30)
             
             # Check if response is valid
             if response.status_code == 200:
-                return response
+                # Verify that we got actual content
+                if len(response.text) > 0:
+                    # Check if it's the player page we expect
+                    if 'player-classic.cgi' in url:
+                        if 'No player found' in response.text:
+                            logging.warning("Player not found in database")
+                            return None
+                        elif 'matchmx' in response.text:
+                            return response
+                        else:
+                            logging.warning("Unexpected content in player page")
+                            continue
+                    else:
+                        return response
             else:
                 logging.warning(f"Request failed with status code: {response.status_code}")
                 
@@ -53,6 +70,7 @@ def make_request(session, url, retries=3, delay=2):
                 raise
             
     raise Exception(f"Failed to get valid response after {retries} attempts")
+
 
 def create_matches_dataframe(matches):
     """Create a DataFrame from matches data with essential columns only"""
@@ -101,39 +119,55 @@ def create_matches_dataframe(matches):
     return df
 
 def parse_matches_from_html(html_content):
-    """Extract matches data from HTML content (for male players)"""
+    """Extract matches data from HTML content with improved parsing"""
     try:
-        # Find the start of matchmx array
+        # Look for the matchmx array in a different way
         start_marker = 'var matchmx = ['
         end_marker = '];'
         
-        # Get the start position
-        start_pos = html_content.find(start_marker)
-        if start_pos == -1:
-            logging.warning("Could not find matchmx variable in HTML")
+        # Find all script tags content
+        import re
+        script_contents = re.findall(r'<script[^>]*>(.*?)</script>', html_content, re.DOTALL)
+        
+        matches_data = None
+        for script in script_contents:
+            if 'var matchmx = [' in script:
+                start_pos = script.find(start_marker) + len(start_marker)
+                end_pos = script.find(end_marker, start_pos)
+                if end_pos != -1:
+                    matches_data = script[start_pos:end_pos]
+                    break
+        
+        if matches_data is None:
+            logging.warning("Could not find matchmx variable in HTML scripts")
             return None
             
-        # Add length of start marker to get to actual data
-        start_pos += len(start_marker) - 1  # -1 to keep the first [
-        
-        # Find the end position
-        end_pos = html_content.find(end_marker, start_pos)
-        if end_pos == -1:
-            logging.warning("Could not find end of matchmx array")
-            return None
+        # Clean up the data
+        matches_data = matches_data.strip()
+        if matches_data.endswith(','):
+            matches_data = matches_data[:-1]
             
-        # Extract the array string
-        matches_str = html_content[start_pos:end_pos + 1]
+        # Convert to proper Python list format
+        matches_data = '[' + matches_data + ']'
+        matches_data = matches_data.replace('null', 'None')
         
-        # Clean up and parse
-        matches_str = matches_str.replace('null', 'None')
-        matches = ast.literal_eval(matches_str)
-        
-        return matches
-        
+        # Parse the string into a Python object
+        try:
+            matches = ast.literal_eval(matches_data)
+            return matches
+        except:
+            # Try using demjson if ast.literal_eval fails
+            try:
+                matches = demjson.decode(matches_data)
+                return matches
+            except Exception as e:
+                logging.error(f"Failed to parse matches data with both ast and demjson: {str(e)}")
+                return None
+                
     except Exception as e:
         logging.error(f"Error parsing matches from HTML: {str(e)}")
         return None
+
 
 
 def parse_matches_from_js(js_content):
