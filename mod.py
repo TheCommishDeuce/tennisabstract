@@ -1,77 +1,35 @@
 import requests
+from bs4 import BeautifulSoup
 import pandas as pd
 import logging
 import demjson3 as demjson
 import time
 import numpy as np
+import re
 import ast
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('tennis_scraper.log'),
-        logging.StreamHandler()
-    ]
-)
 
 def init_session():
-    """Initialize session with more complete headers"""
+    """Initialize session with headers"""
     session = requests.Session()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
     session.headers.update(headers)
     return session
 
-
-def make_request(session, url, retries=3, delay=2):
-    """Make HTTP request with improved error handling and validation"""
+def make_request(session, url, retries=3, delay=1):
+    """Make HTTP request with retry logic and delay"""
     for attempt in range(retries):
         try:
-            if attempt > 0:
-                time.sleep(delay * (attempt))
-            
-            response = session.get(url, timeout=30)
-            
-            # Check if response is valid
-            if response.status_code == 200:
-                # Verify that we got actual content
-                if len(response.text) > 0:
-                    # Check if it's the player page we expect
-                    if 'player-classic.cgi' in url:
-                        if 'No player found' in response.text:
-                            logging.warning("Player not found in database")
-                            return None
-                        elif 'matchmx' in response.text:
-                            return response
-                        else:
-                            logging.warning("Unexpected content in player page")
-                            continue
-                    else:
-                        return response
-            else:
-                logging.warning(f"Request failed with status code: {response.status_code}")
-                
+            time.sleep(delay * (attempt + 1))  # Exponential backoff
+            response = session.get(url)
+            response.raise_for_status()
+            return response
         except requests.RequestException as e:
             logging.error(f"Attempt {attempt + 1} failed for {url}: {str(e)}")
             if attempt == retries - 1:
                 raise
-            
-    raise Exception(f"Failed to get valid response after {retries} attempts")
-
-
 def create_matches_dataframe(matches):
     """Create a DataFrame from matches data with essential columns only"""
     # Define column positions and names mapping
@@ -119,55 +77,39 @@ def create_matches_dataframe(matches):
     return df
 
 def parse_matches_from_html(html_content):
-    """Extract matches data from HTML content with improved parsing"""
+    """Extract matches data from HTML content (for male players)"""
     try:
-        # Look for the matchmx array in a different way
+        # Find the start of matchmx array
         start_marker = 'var matchmx = ['
         end_marker = '];'
         
-        # Find all script tags content
-        import re
-        script_contents = re.findall(r'<script[^>]*>(.*?)</script>', html_content, re.DOTALL)
-        
-        matches_data = None
-        for script in script_contents:
-            if 'var matchmx = [' in script:
-                start_pos = script.find(start_marker) + len(start_marker)
-                end_pos = script.find(end_marker, start_pos)
-                if end_pos != -1:
-                    matches_data = script[start_pos:end_pos]
-                    break
-        
-        if matches_data is None:
-            logging.warning("Could not find matchmx variable in HTML scripts")
+        # Get the start position
+        start_pos = html_content.find(start_marker)
+        if start_pos == -1:
+            logging.warning("Could not find matchmx variable in HTML")
             return None
             
-        # Clean up the data
-        matches_data = matches_data.strip()
-        if matches_data.endswith(','):
-            matches_data = matches_data[:-1]
-            
-        # Convert to proper Python list format
-        matches_data = '[' + matches_data + ']'
-        matches_data = matches_data.replace('null', 'None')
+        # Add length of start marker to get to actual data
+        start_pos += len(start_marker) - 1  # -1 to keep the first [
         
-        # Parse the string into a Python object
-        try:
-            matches = ast.literal_eval(matches_data)
-            return matches
-        except:
-            # Try using demjson if ast.literal_eval fails
-            try:
-                matches = demjson.decode(matches_data)
-                return matches
-            except Exception as e:
-                logging.error(f"Failed to parse matches data with both ast and demjson: {str(e)}")
-                return None
-                
+        # Find the end position
+        end_pos = html_content.find(end_marker, start_pos)
+        if end_pos == -1:
+            logging.warning("Could not find end of matchmx array")
+            return None
+            
+        # Extract the array string
+        matches_str = html_content[start_pos:end_pos + 1]
+        
+        # Clean up and parse
+        matches_str = matches_str.replace('null', 'None')
+        matches = ast.literal_eval(matches_str)
+        
+        return matches
+        
     except Exception as e:
         logging.error(f"Error parsing matches from HTML: {str(e)}")
         return None
-
 
 
 def parse_matches_from_js(js_content):
@@ -186,35 +128,35 @@ def parse_matches_from_js(js_content):
 
 
 def get_player_matches(player_name, base_url="https://www.tennisabstract.com"):
-    """Get all matches for a player with improved error handling"""
+    """Get all matches for a player regardless of gender"""
     try:
         session = init_session()
         all_matches = []
-        
-        logging.info(f"Fetching matches for player: {player_name}")
 
         # Try HTML page first (male players)
-        html_url = f'{base_url}/cgi-bin/player-classic.cgi?p={player_name}'
         try:
+            html_url = f'{base_url}/cgi-bin/player-classic.cgi?p={player_name}'
             response = make_request(session, html_url)
-            content = response.text
             
-            if "Benoit Paire" in content[:100]:
+            # Check if page redirected to Benoit Paire (indicating wrong player/female player)
+            if "Benoit Paire" in response.text[:4000]:
                 logging.info(f"Redirected to Benoit Paire's page, trying JS files for {player_name}")
-            elif "No player found" in content:
-                logging.error(f"Player {player_name} not found")
-                return None
             else:
-                matches = parse_matches_from_html(content)
+                # Check if page indicates player not found
+                if "No player found" in response.text:
+                    logging.error(f"Player {player_name} not found")
+                    return None
+                    
+                matches = parse_matches_from_html(response.text)
                 if matches:
                     all_matches.extend(matches)
-                    logging.info(f"Found {len(matches)} matches in HTML for {player_name}")
+                    logging.info(f"Found matches in HTML for {player_name}")
 
         except Exception as e:
             logging.warning(f"Could not get matches from HTML for {player_name}: {str(e)}")
 
-        # Try JS files if needed
-        if not all_matches:
+        # If no matches found in HTML or redirected to Benoit Paire, try JS files (female players)
+        if not all_matches or "BenoitPaire" in response.text:
             js_urls = [
                 f"{base_url}/jsmatches/{player_name}.js",
                 f"{base_url}/jsmatches/{player_name}Career.js"
@@ -222,16 +164,17 @@ def get_player_matches(player_name, base_url="https://www.tennisabstract.com"):
             for url in js_urls:
                 try:
                     response = make_request(session, url)
-                    matches = parse_matches_from_js(response.text)
-                    if matches:
-                        all_matches.extend(matches)
-                        logging.info(f"Found {len(matches)} matches in JS file: {url}")
+                    if response.status_code == 200:  # Only process if file exists
+                        matches = parse_matches_from_js(response.text)
+                        if matches:
+                            all_matches.extend(matches)
+                            logging.info(f"Found matches in JS file: {url}")
                 except Exception as e:
                     logging.warning(f"Could not get matches from {url}: {str(e)}")
 
+        # Create DataFrame if matches were found
         if all_matches:
             df = create_matches_dataframe(all_matches)
-            logging.info(f"Successfully created DataFrame with {len(df)} matches")
             return df
         
         logging.warning(f"No matches found for {player_name}")
@@ -240,7 +183,6 @@ def get_player_matches(player_name, base_url="https://www.tennisabstract.com"):
     except Exception as e:
         logging.error(f"Error getting player matches: {str(e)}")
         return None
-
 
 def calculate_yearly_stats(df):
     """
