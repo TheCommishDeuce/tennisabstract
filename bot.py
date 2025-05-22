@@ -57,7 +57,7 @@ def process_compare_player2_step(message, p1):
     try:
         p2 = message.text
         keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        keyboard.add('2024', '2023', '2022', 'Other')
+        keyboard.add('2025','2024', '2023', 'Other')
         msg = bot.send_message(message.chat.id, 'Please choose a year:', reply_markup=keyboard)
         bot.register_next_step_handler(msg, lambda m: process_compare_year_step(m, p1, p2))
     except Exception as e:
@@ -67,7 +67,7 @@ def process_compare_year_step(message, p1, p2):
     try:
         year_text = message.text
         if year_text == 'Other':
-            years = [str(y) for y in range(2000, 2022)[::-1]]
+            years = [str(y) for y in range(2000, 2023)[::-1]]
             keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
             for y in years:
                 keyboard.add(y)
