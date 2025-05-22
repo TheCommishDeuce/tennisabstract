@@ -126,6 +126,117 @@ def parse_matches_from_js(js_content):
         logging.error(f"Error parsing matches from JS: {str(e)}")
         return []
 
+def clean_js_value(value_str):
+    """Removes surrounding quotes and trims whitespace from JS variable values."""
+    value_str = value_str.strip()
+    # Remove potential surrounding quotes (single or double)
+    if (value_str.startswith("'") and value_str.endswith("'")) or \
+       (value_str.startswith('"') and value_str.endswith('"')):
+        return value_str[1:-1].strip()
+    # Remove potential trailing semicolon if captured by regex somehow (though unlikely with (.*?);)
+    if value_str.endswith(';'):
+         value_str = value_str[:-1].strip()
+    return value_str
+
+def get_player_details(player_name,base_url="https://www.tennisabstract.com"):
+    session = init_session()
+    player_name = player_name.replace(' ','')
+    extra_vars = ['elo_rank', 'ht', 'hand', 'country']
+    extracted_data = {}
+
+    # Try HTML page first (male players)
+    try:
+        html_url = f'{base_url}/cgi-bin/player-classic.cgi?p={player_name}'
+        response = make_request(session, html_url)
+        
+        # Check if page redirected to Benoit Paire (indicating wrong player/female player)
+        if "Benoit Paire" in response.text[:4000]:
+            # print(f"Redirected to Benoit Paire's page, trying JS files for {player_name}")
+            js_urls = [
+                f"{base_url}/jsmatches/{player_name}.js"
+            ]
+            for url in js_urls:
+                try:
+                    response = make_request(session, url)
+                    # Only process if the file exists and was fetched successfully
+                    if response and response.status_code == 200:
+                        js_content = response.text
+
+                        for variable in extra_vars:
+                            # Only extract if we haven't found this variable yet
+                            if variable not in extracted_data:
+                                pattern = rf"var\s+{variable}\s*=\s*(.*?);"
+                                match = re.search(pattern, js_content)
+
+                                if match:
+                                    raw_value = match.group(1) # Get the captured value part
+                                    cleaned_value = clean_js_value(raw_value)
+                                    extracted_data[variable] = cleaned_value
+
+                    elif response:
+                        print(f"File not found or failed to fetch: {url} (Status: {response.status_code})")
+                    else:
+                        print(f"Request failed for {url}, no response object returned.")
+
+                except Exception as e:
+                    print(f"An error occurred processing {url}: {e}")
+        else:
+            # Check if page indicates player not found
+            if "No player found" in response.text:
+                print(f"Player {player_name} not found")
+                
+            for variable in extra_vars:
+            # Regex pattern handles single quotes, double quotes, and unquoted values
+                pattern = rf"var\s+{variable}\s*=\s*(?:'([^']*)'|\"([^\"]*)\"|([^;'\"]+))\s*;"
+                match = re.search(pattern, response.text)
+
+                if match:
+                    raw_value = next((g for g in match.groups() if g is not None), None)
+                    if raw_value is not None:
+                        extracted_data[variable] = raw_value
+                        # print(f"  Debug: Found {variable} = {cleaned_value}") # Uncomment for debug
+
+    except Exception as e:
+        print(f"Could not get matches from HTML for {player_name}: {str(e)}")
+
+        # If no matches found in HTML or redirected to Benoit Paire, try JS files (female players)
+        if "BenoitPaire" in response.text:
+            js_urls = [
+                f"{base_url}/jsmatches/{player_name}.js",
+                f"{base_url}/jsmatches/{player_name}Career.js"
+            ]
+            for url in js_urls:
+                print(f"Attempting to fetch: {url}")
+                try:
+                    response = make_request(session, url)
+                    # Only process if the file exists and was fetched successfully
+                    if response and response.status_code == 200:
+                        print(f"Successfully fetched: {url}")
+                        js_content = response.text
+
+                        for variable in extra_vars:
+                            # Only extract if we haven't found this variable yet
+                            if variable not in extracted_data:
+                                pattern = rf"var\s+{variable}\s*=\s*(.*?);"
+                                match = re.search(pattern, js_content)
+
+                                if match:
+                                    raw_value = match.group(1) # Get the captured value part
+                                    print(f"  Found {variable}: {raw_value}")
+                                    extracted_data[variable] = raw_value
+
+                    elif response:
+                        print(f"File not found or failed to fetch: {url} (Status: {response.status_code})")
+                    else:
+                        print(f"Request failed for {url}, no response object returned.")
+
+                except Exception as e:
+                    print(f"An error occurred processing {url}: {e}")
+
+            print(f"--- Finished extraction for {player_name} ---")
+
+    return extracted_data
+        
 
 def get_player_matches(player_name, base_url="https://www.tennisabstract.com"):
     """Get all matches for a player regardless of gender"""
@@ -346,7 +457,7 @@ def calculate_career_stats(df):
     
     return career_stats
 
-def compare(p1,p2,year=2024):
+def compare(p1,p2,year=2025):
     try:
         p1_data = pd.DataFrame(calculate_yearly_stats(get_player_matches(p1.replace(' ',''))).loc[year]).rename(columns={year:p1}).iloc[:-1]
         p2_data = pd.DataFrame(calculate_yearly_stats(get_player_matches(p2.replace(' ',''))).loc[year]).rename(columns={year:p2}).iloc[:-1]
@@ -381,9 +492,10 @@ def format_h2h_matches(matches_df, player1, player2):
                                                player1)
     
     # Select and reorder columns, rename them in one step
-    formatted_h2h = h2h_matches[['date', 'tourn', 'winner_name', 'loser_name', 'score', 'round']].rename(columns={
+    formatted_h2h = h2h_matches[['date', 'tourn', 'surf','winner_name', 'loser_name', 'score', 'round']].rename(columns={
         'date': 'match_date',
-        'tourn': 'tournament'
+        'tourn': 'tournament',
+        'surf': 'surface'
     })
     
     # Convert date to date format
@@ -407,6 +519,6 @@ def format_h2h_matches(matches_df, player1, player2):
     formatted_h2h['h2h'] = h2h_column
     
     # Ensure columns are in the correct order
-    formatted_h2h = formatted_h2h[['match_date', 'tournament', 'winner_name', 'loser_name', 'score', 'round', 'h2h']]
+    formatted_h2h = formatted_h2h[['match_date', 'tournament', 'surface', 'winner_name', 'loser_name', 'score', 'round', 'h2h']]
     
     return formatted_h2h
