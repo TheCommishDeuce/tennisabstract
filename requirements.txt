@@ -1,0 +1,10 @@
+Pillow
+pandas
+requests
+pycountry
+beautifulsoup4
+selenium
+pyTelegramBotAPI
+demjson3
+dataframe_image
+numpy
